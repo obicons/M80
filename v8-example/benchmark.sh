@@ -11,9 +11,10 @@ function ensure_docker_images() {
 }
 
 function start_benchmark() {
-    docker network create "$DOCKER_NETWORK_NAME" || true
+    local benchmark_page="$1"
+    docker network create "$DOCKER_NETWORK_NAME" 2>/dev/null || true
     docker container run -d --name "$SERVER_CONTAINER_NAME" --network "$DOCKER_NETWORK_NAME" v8-example
-    docker container run --network "$DOCKER_NETWORK_NAME" wrk -t4 -c100 -d30s "http://$SERVER_CONTAINER_NAME:8080/hello-world.js"
+    docker container run --network "$DOCKER_NETWORK_NAME" wrk -t4 -c100 -d30s "http://$SERVER_CONTAINER_NAME:8080/$benchmark_page"
 }
 
 function cleanup() {
@@ -24,5 +25,9 @@ function cleanup() {
 }
 
 ensure_docker_images
-start_benchmark
+
+start_benchmark "hello-world.js"
+cleanup
+
+start_benchmark "hello-world.so"
 cleanup
