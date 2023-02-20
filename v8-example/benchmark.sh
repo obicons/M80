@@ -26,8 +26,10 @@ function cleanup() {
 
 ensure_docker_images
 
+echo "V8 isolate:"
 start_benchmark "hello-world.js"
 cleanup
 
+echo "Shared library:"
 start_benchmark "hello-world.so"
 cleanup
