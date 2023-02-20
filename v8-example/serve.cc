@@ -1,10 +1,10 @@
-// Copyright 2015 the V8 project authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// Based on the code from V8's embedding example.
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -12,6 +12,11 @@
 #include <sstream>
 #include "include/libplatform/libplatform.h"
 #include "include/v8.h"
+#include "tcp_socket.hh"
+
+extern "C" {
+#include <dlfcn.h>
+}
 
 // This should never need used.
 std::unique_ptr<v8::Platform> platform;
@@ -20,27 +25,120 @@ std::unique_ptr<v8::Platform> platform;
 // Readonly after initialization.
 std::map<std::string, std::string> page_to_js_function;
 
+// Relates page names to dynamic libraries to produce their body.
+// Readonly after initialization.
+std::map<std::string, void*> page_to_dl_handle;
+
 // Initializes V8.
 static void initialize_v8(const char *location);
 
 // Initializes JS resources.
 static void initialize_resources();
 
-int main(int argc, char* argv[]) {
-  if (argc != 2) {
-    std::cerr << "usage: " << argv[0] << " [JS resource to invoke]" << std::endl;
-    return 1;
-  }
+// Returns the resource being accessed in the request.
+static std::string get_resource(const std::string &request);
 
-  const std::string js_resource = argv[1];
+// Handles a HTTP request.
+static void handle_request(TCPSocket client);
+
+// Handles a HTTP request for a JS resource.
+static void handle_js_request(TCPSocket client, const std::string &resource);
+
+static void handle_dl_request(TCPSocket client, const std::string &resource);
+
+int main(int argc, char* argv[]) {
   initialize_v8(argv[0]);
   initialize_resources();
 
-  if (!page_to_js_function.contains(js_resource)) {
-    std::cerr << "unrecognized JS resource: " << js_resource << std::endl;
+  std::optional<TCPSocket> socket = TCPSocket::open("0.0.0.0", 8080);
+  if (!socket.has_value()) {
+    std::cerr << "Could not open socket: " << strerror(errno) << std::endl;
     return 1;
   }
 
+  while (true) {
+    std::optional<TCPSocket> client = socket.value().accept();
+    if (!client.has_value()) {
+      std::cerr << "Could not accept(): " << strerror(errno) << std::endl;
+      return 1;
+    }
+
+    handle_request(client.value());
+  }
+}
+
+static void initialize_v8(const char *location) {
+  v8::V8::InitializeICUDefaultLocation(location);
+  v8::V8::InitializeExternalStartupData(location);
+  platform = v8::platform::NewDefaultPlatform();
+  v8::V8::InitializePlatform(platform.get());
+  v8::V8::Initialize();
+}
+
+// Initializes all resources.
+static void initialize_resources() {
+  for (const auto &entry : std::filesystem::directory_iterator("resources/")) {
+    if (entry.is_regular_file()) {
+      std::ifstream file(entry.path());
+      std::stringstream file_contents;
+      file_contents << file.rdbuf();
+      page_to_js_function[entry.path().filename()] = file_contents.str();
+    }
+  }
+
+  for (const auto &entry : std::filesystem::directory_iterator("build/lib/")) {
+    void *handle = dlopen(entry.path().c_str(), RTLD_NOW);
+    if (!handle) {
+      std::cerr << "Unable to dlopen(): " << strerror(errno) << std::endl;
+      std::exit(1);
+    }
+
+    page_to_dl_handle[entry.path().filename()] = handle;
+  }
+}
+
+static std::string get_resource(const std::string &request) {
+  if (request.length() == 0) {
+    return "";
+  }
+
+  size_t start = 0;
+  while (start < request.length() - 1 && !isspace(request[start])) {
+    start++;
+  }
+  start++;
+
+
+  size_t count = 1;
+  while (start + count < request.length() && !isspace(request[start + count])) {
+    count++;
+  }
+
+  std::string request_str = request.substr(start, count);
+  if (request_str.starts_with("/")) {
+    return request_str.substr(1);
+  }
+
+  return request_str;
+}
+
+static void handle_request(TCPSocket client) {
+  std::array<char, 1024> buffer;
+  ssize_t nread = read(client, buffer.data(), buffer.size());
+  std::string request_string(buffer.begin(), buffer.begin() + nread);
+  std::string resource = get_resource(request_string);
+
+  if (page_to_js_function.contains(resource)) {
+    handle_js_request(client, resource);
+  } else if (page_to_dl_handle.contains(resource)) {
+    handle_dl_request(client, resource);
+  } else {
+    client.write("HTTP/1.1 404 Not Found\r\n\r\nnot found");
+  }
+}
+
+// Handles a HTTP request for a JS resource.
+static void handle_js_request(TCPSocket client, const std::string &resource) {
   // Create a new Isolate and make it the current one.
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator =
@@ -61,7 +159,7 @@ int main(int argc, char* argv[]) {
 
     // Create a string containing the JavaScript source code.
     v8::Local<v8::String> source =
-      v8::String::NewFromUtf8(isolate, page_to_js_function[js_resource].c_str(),
+      v8::String::NewFromUtf8(isolate, page_to_js_function[resource].c_str(),
                               v8::NewStringType::kNormal).ToLocalChecked();
 
     // Compile the source code.
@@ -74,54 +172,48 @@ int main(int argc, char* argv[]) {
                          .ToLocalChecked());
 
     if (maybe_main_func.IsEmpty()) {
-      std::cerr << "error: JS resource does not define a main() function." << std::endl;
-      return 1;
+      client.write("HTTP/1.1 500 Internal Server Error\r\n");
+      return;
     }
 
     v8::Local<v8::Value> main_func = maybe_main_func.ToLocalChecked();
     if (!main_func->IsFunction()) {
-      std::cerr << "error: JS resource does not define a main() function." << std::endl;
-      return 1;
+      client.write("HTTP/1.1 500 Internal Server Error\r\n");
+      return;
     }
 
     v8::MaybeLocal<v8::Value> maybe_return_value =
         main_func.As<v8::Function>()->Call(context, main_func, 0, nullptr);
     if (maybe_return_value.IsEmpty()) {
-      std::cerr << "error: JS resource did not return a value." << std::endl;
-      return 1;
+      client.write("HTTP/1.1 500 Internal Server Error\r\n");
+      return;
     }
 
     v8::Local<v8::Value> rvalue = maybe_return_value.ToLocalChecked();
     if (!rvalue->IsString()) {
-      std::cerr << "error: JS resource did not return a string." << std::endl;
-      return 1;
+      client.write("HTTP/1.1 500 Internal Server Error\r\n");
+      return;
     }
 
-    std::cout << *v8::String::Utf8Value(isolate, rvalue) << std::endl;
+    client.write("HTTP/1.1 200 OK\r\n\r\n" + std::string(*v8::String::Utf8Value(isolate, rvalue)));
   }
 
   // Dispose the isolate and tear down V8.
   isolate->Dispose();
-  v8::V8::Dispose();
   delete create_params.array_buffer_allocator;
 }
 
-static void initialize_v8(const char *location) {
-  v8::V8::InitializeICUDefaultLocation(location);
-  v8::V8::InitializeExternalStartupData(location);
-  platform = v8::platform::NewDefaultPlatform();
-  v8::V8::InitializePlatform(platform.get());
-  v8::V8::Initialize();
-}
+static void handle_dl_request(TCPSocket client, const std::string &resource) {
+  void *dl_handle = page_to_dl_handle[resource];
 
-// Initializes JS resources.
-static void initialize_resources() {
-  for (const auto &entry : std::filesystem::directory_iterator("resources/")) {
-    if (entry.is_regular_file()) {
-      std::ifstream file(entry.path());
-      std::stringstream file_contents;
-      file_contents << file.rdbuf();
-      page_to_js_function[entry.path().filename()] = file_contents.str();
-    }
+  const char* (*http_main)(void) =
+    (const char* (*)(void)) dlsym(dl_handle, "http_main");
+
+  if (!http_main) {
+    client.write("HTTP/1.1 500 Internal Server Error\r\n");
+    return;
   }
+
+  std::string response = http_main();
+  client.write("HTTP/1.1 200 OK\r\n\r\n" + response);
 }
