@@ -33,3 +33,5 @@ cleanup
 echo "Shared library:"
 start_benchmark "hello-world.so"
 cleanup
+
+echo "Finished"
