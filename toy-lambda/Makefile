@@ -1,9 +1,10 @@
-CXXFLAGS=-std=c++2b -fno-rtti								\
-         -lv8_monolith										\
-		 -lv8_libbase -lv8_libplatform -ldl 				\
-		 -DV8_COMPRESS_POINTERS -DV8_ENABLE_SANDBOX			\
-		 -I$(HOME)/src/v8/v8/ -I$(HOME)/src/v8/v8/include	\
-		 -L$(HOME)/src/v8/v8//out.gn/x64.release.sample/obj/
+CXXFLAGS=-std=c++2b -fno-rtti									\
+         -lv8_monolith											\
+		 -lv8_libbase -lv8_libplatform -ldl 					\
+		 -DV8_COMPRESS_POINTERS -DV8_ENABLE_SANDBOX				\
+		 -I$(HOME)/src/v8/v8/ -I$(HOME)/src/v8/v8/include		\
+		 -L$(HOME)/src/v8/v8//out.gn/x64.release.sample/obj/	\
+		 -Idependencies/ELFIO/
 objs=$(shell find . -maxdepth 1 -name '*.cc' -exec sh -c 'echo build/`basename {}`' \; | sed 's/\.cc/\.o/g')
 dyobjs=$(shell find lib -maxdepth 1 -name '*.cc' -exec sh -c 'echo build/{}' \; | sed 's/\.cc/\.so/g')
 

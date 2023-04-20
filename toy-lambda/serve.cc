@@ -13,6 +13,7 @@
 #include "include/libplatform/libplatform.h"
 #include "include/v8.h"
 #include "tcp_socket.hh"
+#include "nacl_loader.hh"
 
 extern "C" {
 #include <dlfcn.h>
@@ -28,6 +29,10 @@ std::map<std::string, std::string> page_to_js_function;
 // Relates page names to dynamic libraries to produce their body.
 // Readonly after initialization.
 std::map<std::string, void*> page_to_dl_handle;
+
+// Relates page names to nacl contexts.
+// Readonly after initialization.
+std::map<std::string, std::unique_ptr<NaClContext>> page_to_nacl_context;
 
 // Initializes V8.
 static void initialize_v8(const char *location);
@@ -49,6 +54,17 @@ static void handle_dl_request(TCPSocket client, const std::string &resource);
 int main(int argc, char* argv[]) {
   initialize_v8(argv[0]);
   initialize_resources();
+
+  page_to_nacl_context["a.out"] = NaClContext::create_context("native_client_bin/a.out");
+  if (page_to_nacl_context["a.out"] == nullptr) {
+    std::cerr << "Could not allocate native client sandbox." << std::endl;
+    return 1;
+  }
+
+  std::cout << "Created sandbox." << std::endl;
+  std::cout << "Sandbox output: " << page_to_nacl_context["a.out"]->call().value() << std::endl;
+  std::cout << "This verifies the sandbox is provisioned and can execute client code." << std::endl;
+  
 
   std::optional<TCPSocket> socket = TCPSocket::open("0.0.0.0", 8080);
   if (!socket.has_value()) {
@@ -122,6 +138,17 @@ static std::string get_resource(const std::string &request) {
   return request_str;
 }
 
+static void handle_sandbox_request(TCPSocket client, const std::string &resource) {
+  std::unique_ptr<NaClContext> &sandbox = page_to_nacl_context[resource];
+  std::optional<std::string> result = sandbox->call();
+  if (!result.has_value()) {
+    std::cout << "PROBLEM" << std::endl;
+    client.write("HTTP/1.1 500 Internal Server Error");
+  } else {
+    client.write("HTTP/1.1 200 OK\r\n\r\n" + result.value());
+  }
+}
+
 static void handle_request(TCPSocket client) {
   std::array<char, 1024> buffer;
   ssize_t nread = read(client, buffer.data(), buffer.size());
@@ -132,6 +159,8 @@ static void handle_request(TCPSocket client) {
     handle_js_request(client, resource);
   } else if (page_to_dl_handle.contains(resource)) {
     handle_dl_request(client, resource);
+  } else if (resource == "a.out") {
+    handle_sandbox_request(client, "a.out");
   } else {
     client.write("HTTP/1.1 404 Not Found\r\n\r\nnot found");
   }
